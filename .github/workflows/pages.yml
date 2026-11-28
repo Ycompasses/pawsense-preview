@@ -35,6 +35,43 @@ jobs:
       - name: Install dependencies
         working-directory: frontend
         run: npm ci
+      - name: Optimize images and fonts
+        working-directory: frontend
+        run: |
+          python -m pip install 'Pillow>=11,<14' 'fonttools[woff]>=4.60,<5'
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          from fontTools import subset
+          import json,re
+          root=Path.cwd();assets=root/'public/assets';sources=list((root/'src').glob('*.tsx'))+list((root/'src').glob('*.css'))
+          text=''.join(p.read_text() for p in sources);chars=set(text)|set(chr(c) for c in range(32,592));mapping={};before=after=0
+          for path in assets.glob('*.png'):
+           target=path.with_suffix('.webp');im=Image.open(path);limit=1920 if path.name=='welcome-source-1.png' else 1600
+           im.thumbnail((limit,limit),Image.Resampling.LANCZOS)
+           im.save(target,'WEBP',quality=88,method=6)
+           if target.stat().st_size<path.stat().st_size:
+            mapping[path.name]=target.name;before+=path.stat().st_size;after+=target.stat().st_size
+          for path in list(assets.glob('*.otf'))+list(assets.glob('*.ttf')):
+           target=path.with_suffix('.woff2');options=subset.Options();options.flavor='woff2'
+           font=subset.load_font(str(path),options);subsetter=subset.Subsetter(options=options);subsetter.populate(unicodes=[ord(c) for c in chars]);subsetter.subset(font);subset.save_font(font,str(target),options)
+           mapping[path.name]=target.name;before+=path.stat().st_size;after+=target.stat().st_size
+          for path in sources:
+           s=path.read_text()
+           for old,new in mapping.items():s=s.replace('/assets/'+old,'/assets/'+new)
+           if path.suffix=='.css':s=re.sub(r'@font-face\{', '@font-face{font-display:swap;',s)
+           path.write_text(s)
+          # Keep the welcome screen eager; other page modules load when opened.
+          p=root/'src/main.tsx';s=p.read_text()
+          if 'lazy, Suspense' not in s:
+           s=s.replace('useEffect, useState','useEffect, useState, lazy, Suspense')
+           s=re.sub(r"import (\w+) from './(\w+)';",lambda m:m[0] if m[1] in ['Welcome','SwipeStart'] else f"const {m[1]} = lazy(() => import('./{m[2]}'));",s)
+           s=s.replace('<View/>','<Suspense fallback={<div className="page-loading" role="status">加载中…</div>}><View/></Suspense>')
+           p.write_text(s)
+          report={'converted_source_bytes':before,'optimized_bytes':after,'savings_percent':round((1-after/before)*100,1),'mapping':mapping}
+          (root/'outputs').mkdir(exist_ok=True);(root/'outputs/asset-optimization.json').write_text(json.dumps(report,indent=2))
+          print(json.dumps({k:v for k,v in report.items() if k!='mapping'}))
+          PY
       - name: Build frontend
         working-directory: frontend
         run: npm run build
